@@ -23,6 +23,7 @@ jobs:
       - run: flutter create --platforms=android --project-name led_control .
       - run: flutter pub get
       - run: flutter test
+      - run: flutter analyze --no-fatal-infos --no-fatal-warnings
       - run: flutter build apk --release
       - run: cp build/app/outputs/flutter-apk/app-release.apk LED-Control.apk
       # Publica o APK numa Release para baixar direto pelo celular

@@ -341,3 +341,120 @@ List<double> rgbToHsv(int r, int g, int b) {
   if (h < 0) h += 360;
   return [h, mx == 0 ? 0.0 : d / mx, mx];
 }
+
+// ---------------------------------------------------------------------------
+// Configuração de Wi-Fi de uma fita nova (modo AP "LEDnet...")
+// Com o celular conectado na rede da fita, ela fica em 10.10.123.3.
+// Usa os comandos AT do módulo Wi-Fi (HF-LPB) pela porta UDP 48899.
+// ---------------------------------------------------------------------------
+
+const String apModeIp = '10.10.123.3';
+
+class _Udp {
+  final RawDatagramSocket socket;
+  final List<String> inbox = [];
+  late final StreamSubscription sub;
+
+  _Udp(this.socket) {
+    socket.broadcastEnabled = true;
+    sub = socket.listen((e) {
+      if (e != RawSocketEvent.read) return;
+      final dg = socket.receive();
+      if (dg != null) inbox.add(utf8.decode(dg.data, allowMalformed: true));
+    });
+  }
+
+  static Future<_Udp> open() async {
+    try {
+      return _Udp(await RawDatagramSocket.bind(InternetAddress.anyIPv4, 48899));
+    } catch (_) {
+      return _Udp(await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0));
+    }
+  }
+
+  /// Envia e espera uma resposta que satisfaça [ok]. Tenta [tries] vezes.
+  Future<String?> ask(String msg, String ip, bool Function(String) ok,
+      {int tries = 3}) async {
+    for (var t = 0; t < tries; t++) {
+      inbox.clear();
+      socket.send(utf8.encode(msg), InternetAddress(ip), 48899);
+      for (var i = 0; i < 15; i++) {
+        await Future.delayed(const Duration(milliseconds: 100));
+        for (final m in inbox) {
+          if (ok(m)) return m.trim();
+        }
+      }
+    }
+    return null;
+  }
+
+  void send(String msg, String ip) =>
+      socket.send(utf8.encode(msg), InternetAddress(ip), 48899);
+
+  Future<void> close() async {
+    await sub.cancel();
+    socket.close();
+  }
+}
+
+/// Procura a fita na rede própria dela. Retorna "ip,mac,modelo" ou null.
+Future<String?> findApModeDevice() async {
+  final udp = await _Udp.open();
+  try {
+    for (final ip in [apModeIp, '10.10.123.255', '255.255.255.255']) {
+      final r = await udp.ask('HF-A11ASSISTHREAD', ip,
+          (m) => m.split(',').length >= 3, tries: 2);
+      if (r != null) return r;
+    }
+    return null;
+  } finally {
+    await udp.close();
+  }
+}
+
+/// Manda a fita entrar na rede [ssid]. [log] recebe o passo a passo.
+Future<bool> configureDeviceWifi({
+  required String ssid,
+  required String password,
+  required void Function(String) log,
+  String ip = apModeIp,
+}) async {
+  final udp = await _Udp.open();
+  bool isOk(String m) => m.startsWith('+ok');
+  try {
+    log('Conectando na fita…');
+    final hello = await udp.ask(
+        'HF-A11ASSISTHREAD', ip, (m) => m.split(',').length >= 3);
+    if (hello == null) {
+      log('A fita não respondeu. Confira se o celular está na rede dela.');
+      return false;
+    }
+    log('Fita encontrada: $hello');
+    udp.send('+ok', ip);
+    await Future.delayed(const Duration(milliseconds: 300));
+
+    final steps = <String, String>{
+      'Enviando nome da rede': 'AT+WSSSID=$ssid\r',
+      'Enviando senha': password.isEmpty
+          ? 'AT+WSKEY=OPEN,NONE\r'
+          : 'AT+WSKEY=WPA2PSK,AES,$password\r',
+      'Mudando para modo cliente': 'AT+WMODE=STA\r',
+    };
+    for (final s in steps.entries) {
+      log('${s.key}…');
+      final r = await udp.ask(s.value, ip, isOk);
+      if (r == null) {
+        log('Sem confirmação em "${s.key}". Este modelo pode não aceitar '
+            'configuração por aqui — use o app Magic Home só para esse passo.');
+        return false;
+      }
+    }
+    log('Reiniciando a fita…');
+    udp.send('AT+Z\r', ip);
+    await Future.delayed(const Duration(milliseconds: 500));
+    log('Pronto! A fita vai reiniciar e entrar na rede "$ssid".');
+    return true;
+  } finally {
+    await udp.close();
+  }
+}

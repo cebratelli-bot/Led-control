@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'magic_home.dart';
@@ -125,6 +126,12 @@ class _HomePageState extends State<HomePage> {
     } finally {
       if (mounted) setState(() => _scanning = false);
     }
+  }
+
+  Future<void> _openSetup() async {
+    final done = await Navigator.push<bool>(
+        context, MaterialPageRoute(builder: (_) => const SetupPage()));
+    if (done == true && mounted) _scan();
   }
 
   Future<void> _addManual() async {
@@ -257,6 +264,11 @@ class _HomePageState extends State<HomePage> {
                 : const Icon(Icons.wifi_find),
           ),
           IconButton(
+            tooltip: 'Configurar fita nova',
+            onPressed: _openSetup,
+            icon: const Icon(Icons.settings_input_antenna),
+          ),
+          IconButton(
             tooltip: 'Adicionar pelo IP',
             onPressed: _addManual,
             icon: const Icon(Icons.add),
@@ -283,6 +295,11 @@ class _HomePageState extends State<HomePage> {
                       onPressed: _scan,
                       icon: const Icon(Icons.wifi_find),
                       label: const Text('Buscar fitas')),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                      onPressed: _openSetup,
+                      icon: const Icon(Icons.settings_input_antenna),
+                      label: const Text('Configurar fita nova')),
                 ]),
               ),
             if (_devices.length > 1)
@@ -642,6 +659,214 @@ class _ControlPageState extends State<ControlPage> {
               onChanged: onChanged,
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Configurar fita nova: conecta na rede da fita e manda os dados do Wi-Fi
+// ---------------------------------------------------------------------------
+
+class SetupPage extends StatefulWidget {
+  const SetupPage({super.key});
+
+  @override
+  State<SetupPage> createState() => _SetupPageState();
+}
+
+class _SetupPageState extends State<SetupPage> {
+  static const _net = MethodChannel('led_control/net');
+  final _ssid = TextEditingController();
+  final _pass = TextEditingController();
+  final List<String> _log = [];
+  String? _found;
+  bool _busy = false;
+  bool _done = false;
+  bool _showPass = false;
+
+  Future<void> _bind(bool on) async {
+    try {
+      await _net.invokeMethod(on ? 'bindWifi' : 'unbind');
+    } catch (_) {}
+  }
+
+  @override
+  void dispose() {
+    _bind(false);
+    _ssid.dispose();
+    _pass.dispose();
+    super.dispose();
+  }
+
+  Future<void> _find() async {
+    setState(() {
+      _busy = true;
+      _found = null;
+      _log.clear();
+    });
+    await _bind(true);
+    final r = await findApModeDevice();
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _found = r;
+      _log.add(r == null
+          ? 'Nenhuma fita encontrada. Confira se o celular está conectado na rede da fita (LEDnet…).'
+          : 'Fita encontrada: $r');
+    });
+  }
+
+  Future<void> _send() async {
+    if (_ssid.text.trim().isEmpty) {
+      setState(() => _log.add('Digite o nome da sua rede Wi-Fi.'));
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _log.clear();
+    });
+    await _bind(true);
+    final ok = await configureDeviceWifi(
+      ssid: _ssid.text.trim(),
+      password: _pass.text,
+      log: (m) {
+        if (mounted) setState(() => _log.add(m));
+      },
+    );
+    await _bind(false);
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _done = ok;
+    });
+  }
+
+  Widget _step(int n, String title, Widget body) => Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(children: [
+                CircleAvatar(radius: 13, child: Text('$n')),
+                const SizedBox(width: 10),
+                Expanded(
+                    child: Text(title,
+                        style: const TextStyle(fontWeight: FontWeight.bold))),
+              ]),
+              const SizedBox(height: 10),
+              body,
+            ],
+          ),
+        ),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Configurar fita nova')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          _step(
+            1,
+            'Conecte o celular na rede da fita',
+            const Text(
+              'Ligue a fita na tomada. Nas configurações de Wi-Fi do celular, '
+              'procure uma rede chamada "LEDnet…" (ou parecida), sem senha, e conecte.\n\n'
+              'Se o Android avisar que a rede não tem internet, escolha manter conectado.\n\n'
+              'Não aparece? A fita já pode estar presa a outro Wi-Fi: desligue e ligue '
+              'ela da tomada umas 5 vezes seguidas para resetar, e procure de novo.',
+            ),
+          ),
+          _step(
+            2,
+            'Encontre a fita',
+            Row(children: [
+              FilledButton.icon(
+                onPressed: _busy ? null : _find,
+                icon: const Icon(Icons.search),
+                label: const Text('Procurar'),
+              ),
+              const SizedBox(width: 12),
+              if (_found != null)
+                const Icon(Icons.check_circle, color: Colors.greenAccent),
+            ]),
+          ),
+          _step(
+            3,
+            'Dados do Wi-Fi da sua casa (2.4 GHz)',
+            Column(children: [
+              TextField(
+                controller: _ssid,
+                decoration: const InputDecoration(
+                    labelText: 'Nome da rede (exatamente igual)'),
+              ),
+              TextField(
+                controller: _pass,
+                obscureText: !_showPass,
+                decoration: InputDecoration(
+                  labelText: 'Senha',
+                  suffixIcon: IconButton(
+                    icon: Icon(
+                        _showPass ? Icons.visibility_off : Icons.visibility),
+                    onPressed: () => setState(() => _showPass = !_showPass),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'A fita só funciona em 2.4 GHz. Se o roteador tem duas redes '
+                '(ex.: "Casa" e "Casa_5G"), use a que não é 5G.',
+                style: TextStyle(fontSize: 12, color: Colors.white70),
+              ),
+              const SizedBox(height: 12),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: FilledButton.icon(
+                  onPressed: _busy ? null : _send,
+                  icon: _busy
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.send),
+                  label: const Text('Enviar para a fita'),
+                ),
+              ),
+            ]),
+          ),
+          if (_log.isNotEmpty)
+            Card(
+              color: Colors.black26,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [for (final l in _log) Text('• $l')],
+                ),
+              ),
+            ),
+          if (_done)
+            _step(
+              4,
+              'Volte para o Wi-Fi da sua casa',
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                      'Conecte o celular de novo na sua rede, espere uns 20 segundos '
+                      'e toque em buscar. Repita estes passos para cada fita.'),
+                  const SizedBox(height: 12),
+                  FilledButton(
+                    onPressed: () => Navigator.pop(context, true),
+                    child: const Text('Já voltei, buscar fitas'),
+                  ),
+                ],
+              ),
+            ),
         ],
       ),
     );
